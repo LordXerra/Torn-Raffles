@@ -179,6 +179,46 @@
             letter-spacing: 1px;
         }
 
+        .wheel-layout {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .wheel-stage { text-align: center; }
+        .wheel-stage canvas { width: 100%; max-width: 420px; height: auto; display: block; margin: 0 auto; }
+        .wheel-status { min-height: 24px; margin-top: 10px; font-size: 16px; font-weight: 600; color: var(--accent); }
+
+        .prizes h2, .winners h2 { font-size: 15px; margin-bottom: 8px; }
+        .prize-slot { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .prize-slot label { width: 20px; flex: none; text-align: right; font-size: 12px; color: var(--muted); }
+        .prize-slot input {
+            flex: 1;
+            min-width: 0;
+            padding: 6px 8px;
+            background: var(--bg);
+            border: 1px solid var(--line);
+            border-radius: 5px;
+        }
+        .prize-slot input:focus { outline: none; border-color: var(--accent); }
+        .once { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 13px; }
+        .once input { width: 16px; height: 16px; accent-color: var(--accent); }
+        .spin-btn { width: 100%; font-size: 16px; padding: 10px; }
+        .hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
+
+        .event-card {
+            background: var(--panel-2);
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 10px;
+        }
+        .event-head { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+        .result { display: flex; gap: 12px; justify-content: space-between; padding: 3px 0; }
+        .result .prize { min-width: 0; overflow-wrap: anywhere; }
+        .result a { flex: none; font-weight: 600; text-decoration: none; }
+        .event-card details { margin-top: 6px; font-size: 12px; color: var(--muted); }
+        .event-card summary { cursor: pointer; }
+
         .chain { font-size: 13px; margin-bottom: 12px; }
         .chain.ok { color: var(--good); }
         .chain.broken { color: var(--bad); font-weight: 600; }
@@ -263,7 +303,26 @@
                     <button class="tab" data-tab="log" role="tab">Log</button>
                 </div>
                 <div class="tab-body">
-                    <div data-pane="wheel" class="wip">W.I.P</div>
+                    <div data-pane="wheel">
+                        <div class="wheel-layout">
+                            <div class="wheel-stage">
+                                <canvas id="wheel" width="840" height="880" role="img"
+                                        aria-label="Prize wheel of ticked members"></canvas>
+                                <div class="wheel-status" id="wheelStatus" aria-live="polite"></div>
+                            </div>
+                            <form class="prizes" id="wheelSetup" hidden>
+                                <h2>Prizes, rolled in order</h2>
+                                <div id="prizeSlots"></div>
+                                <label class="once"><input type="checkbox" id="winOnce" checked> Each member can only win once</label>
+                                <button class="btn primary spin-btn" id="spinBtn" type="submit">Spin</button>
+                                <p class="hint">Winners are drawn and logged the moment you press Spin, and can't be re-rolled.</p>
+                            </form>
+                        </div>
+                        <div class="winners">
+                            <h2>Winners</h2>
+                            <div id="wheelHistory"></div>
+                        </div>
+                    </div>
                     <div data-pane="raffle" class="wip" hidden>W.I.P</div>
                     <div data-pane="log" hidden>
                         <div class="chain" id="chainStatus"></div>
@@ -330,6 +389,7 @@
             $('login').hidden = true;
             $('app').hidden = false;
             if (activeTab === 'log') loadLog();
+            if (activeTab === 'wheel') loadWheelHistory();
         }
 
         function signOut(message) {
@@ -382,6 +442,8 @@
             $('memberCount').textContent = members.length;
             $('includedCount').textContent = members.filter(m => m.included).length;
             $('allBtn').hidden = $('noneBtn').hidden = !canPlan;
+            $('wheelSetup').hidden = !canPlan;
+            if (!wheelRun) drawWheel(tickedMembers());
 
             const scroll = $('memberList').scrollTop;
             $('memberList').replaceChildren(...members.map(m => memberRow(m, me, canPlan)));
@@ -468,6 +530,8 @@
                 case 'role.changed': return `Changed ${d.name} [${d.id}] from ${d.from} to ${d.to}`;
                 case 'included.changed': return `${d.included ? 'Included' : 'Removed'} ${d.name} [${d.id}]`;
                 case 'included.all': return `Set all members ${onOff} (${d.changed} changed)`;
+                case 'wheel.spun': return `Spun the wheel with ${d.entrants.length} entrants: ` +
+                    d.results.map(r => `${r.name} [${r.id}] won ${r.prize}`).join(', ');
                 default: return `${e.action} ${JSON.stringify(d)}`;
             }
         }
@@ -506,11 +570,224 @@
             }));
         }
 
+        // ---- Wheel ----
+
+        const WHEEL_COLOURS = ['#e0a63c', '#5cc98a', '#5b9be8', '#e8695f', '#b58be8', '#4fc4c4'];
+        const FULL_TURN = Math.PI * 2;
+        const CRUISE_SPEED = FULL_TURN * 1.5;   // radians per second
+        const SPIN_SECONDS = 5;                 // at full speed, then...
+        const BRAKE_SECONDS = 4;                // ...gradually slowing to a stop
+        const REVEAL_MS = 2500;                 // pause on each winner before the next spin
+        const CENTRE_X = 420;
+        const CENTRE_Y = 460;
+        const RADIUS = 400;
+
+        let wheelAngle = 0;
+        let wheelRun = null;        // { seq, shown } while a spin is playing
+        let shownHistory = '';
+
+        function tickedMembers() {
+            return state ? state.members.filter(m => m.included) : [];
+        }
+
+        function fitText(ctx, text, width) {
+            if (ctx.measureText(text).width <= width) return text;
+            let cut = text;
+            while (cut && ctx.measureText(`${cut}…`).width > width) cut = cut.slice(0, -1);
+            return `${cut}…`;
+        }
+
+        function drawWheel(entrants) {
+            const ctx = $('wheel').getContext('2d');
+            ctx.clearRect(0, 0, 840, 880);
+            const count = entrants.length;
+
+            if (!count) {
+                ctx.beginPath();
+                ctx.arc(CENTRE_X, CENTRE_Y, RADIUS, 0, FULL_TURN);
+                ctx.fillStyle = '#272b33';
+                ctx.fill();
+                ctx.fillStyle = '#9aa1ad';
+                ctx.font = '30px "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('No members ticked', CENTRE_X, CENTRE_Y);
+            }
+
+            const slice = FULL_TURN / count;
+            const fontSize = Math.max(12, Math.min(30, slice * RADIUS * 0.6));
+            ctx.font = `600 ${fontSize}px "Segoe UI", sans-serif`;
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            entrants.forEach((entrant, i) => {
+                const start = wheelAngle - Math.PI / 2 + i * slice;
+                // The last slice meets the first, so it can't repeat its colour.
+                const clash = i === count - 1 && count > 1 && i % WHEEL_COLOURS.length === 0;
+                ctx.beginPath();
+                ctx.moveTo(CENTRE_X, CENTRE_Y);
+                ctx.arc(CENTRE_X, CENTRE_Y, RADIUS, start, start + slice);
+                ctx.closePath();
+                ctx.fillStyle = WHEEL_COLOURS[clash ? 1 : i % WHEEL_COLOURS.length];
+                ctx.fill();
+                ctx.strokeStyle = '#14161a';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.save();
+                ctx.translate(CENTRE_X, CENTRE_Y);
+                ctx.rotate(start + slice / 2);
+                ctx.fillStyle = '#14161a';
+                ctx.fillText(fitText(ctx, entrant.name, RADIUS - 110), RADIUS - 18, 0);
+                ctx.restore();
+            });
+
+            ctx.beginPath();
+            ctx.arc(CENTRE_X, CENTRE_Y, 44, 0, FULL_TURN);
+            ctx.fillStyle = '#1e2127';
+            ctx.fill();
+
+            // Pointer, fixed at the top of the wheel
+            ctx.beginPath();
+            ctx.moveTo(CENTRE_X - 30, 12);
+            ctx.lineTo(CENTRE_X + 30, 12);
+            ctx.lineTo(CENTRE_X, 92);
+            ctx.closePath();
+            ctx.fillStyle = '#e6e8ec';
+            ctx.strokeStyle = '#14161a';
+            ctx.lineWidth = 4;
+            ctx.fill();
+            ctx.stroke();
+        }
+
+        // Turns the wheel so the pointer ends up on entrants[index]. Speed is set so a
+        // whole number of turns lands exactly there, with no visible correction at the end.
+        function spinTo(entrants, index) {
+            const slice = FULL_TURN / entrants.length;
+            const landing = (index + 0.5 + (Math.random() - 0.5) * 0.7) * slice;
+            const toTarget = ((-landing - wheelAngle) % FULL_TURN + FULL_TURN) % FULL_TURN;
+            const effective = SPIN_SECONDS + BRAKE_SECONDS / 3;
+            const turns = Math.round((CRUISE_SPEED * effective - toTarget) / FULL_TURN);
+            const speed = (toTarget + turns * FULL_TURN) / effective;
+            const from = wheelAngle;
+
+            return new Promise(resolve => {
+                let begun = null;
+                function frame(now) {
+                    begun ??= now;
+                    const t = (now - begun) / 1000;
+                    if (t <= SPIN_SECONDS) {
+                        wheelAngle = from + speed * t;
+                    } else {
+                        const left = 1 - Math.min(1, (t - SPIN_SECONDS) / BRAKE_SECONDS);
+                        wheelAngle = from + speed * (SPIN_SECONDS + BRAKE_SECONDS * (1 - left ** 3) / 3);
+                    }
+                    drawWheel(entrants);
+                    if (t < SPIN_SECONDS + BRAKE_SECONDS) requestAnimationFrame(frame);
+                    else resolve();
+                }
+                requestAnimationFrame(frame);
+            });
+        }
+
+        async function spinWheel() {
+            const inputs = [...document.querySelectorAll('#prizeSlots input')];
+            const prizes = inputs.map(i => i.value.trim()).filter(Boolean);
+            if (!prizes.length) return showNotice('Enter at least one prize.');
+
+            const lock = locked => {
+                $('spinBtn').disabled = locked;
+                $('winOnce').disabled = locked;
+                inputs.forEach(i => { i.disabled = locked; });
+            };
+            lock(true);
+            let event;
+            try {
+                event = await withSession(() => api('/api/wheel/spin', { prizes, unique: $('winOnce').checked }));
+            } catch (err) {
+                showNotice(err.message);
+            }
+            if (!event) return lock(false);
+
+            wheelRun = { seq: event.seq, shown: 0 };
+            loadWheelHistory();
+            let entrants = event.detail.entrants;
+            for (const result of event.detail.results) {
+                $('wheelStatus').textContent = `Spinning for ${result.prize}...`;
+                await spinTo(entrants, entrants.findIndex(e => e.id === result.id));
+                $('wheelStatus').textContent = `${result.name} wins ${result.prize}!`;
+                wheelRun.shown++;
+                loadWheelHistory();
+                await new Promise(resolve => setTimeout(resolve, REVEAL_MS));
+                if (event.detail.unique) {
+                    entrants = entrants.filter(e => e.id !== result.id);
+                    drawWheel(entrants);
+                }
+            }
+
+            wheelRun = null;
+            inputs.forEach(i => { i.value = ''; });
+            lock(false);
+            drawWheel(tickedMembers());
+            loadWheelHistory();
+        }
+
+        function eventCard(event) {
+            const results = event.detail.results;
+            const shown = event.seq === wheelRun?.seq ? wheelRun.shown : results.length;
+            const card = document.createElement('article');
+            card.className = 'event-card';
+
+            const head = document.createElement('div');
+            head.className = 'event-head';
+            head.textContent = `${formatTime(event.ts)} · Spun by ${event.actor_name} · log #${event.seq}`;
+            card.append(head);
+
+            for (const r of results.slice(0, shown)) {
+                const row = document.createElement('div');
+                row.className = 'result';
+                const prize = document.createElement('span');
+                prize.className = 'prize';
+                prize.textContent = r.prize;
+                const link = document.createElement('a');
+                link.href = `https://www.torn.com/profiles.php?XID=${r.id}`;
+                link.target = '_blank';
+                link.rel = 'noopener';
+                link.textContent = `${r.name} [${r.id}]`;
+                row.append(prize, link);
+                card.append(row);
+            }
+
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.textContent = `${event.detail.entrants.length} entrants`
+                + (event.detail.unique ? ', each could win once' : '');
+            details.append(summary, event.detail.entrants.map(e => e.name).join(', '));
+            card.append(details);
+            return card;
+        }
+
+        async function loadWheelHistory() {
+            let data;
+            try {
+                data = await withSession(() => api('/api/wheel/history'));
+            } catch (err) {
+                return showNotice(err.message);
+            }
+            if (!data) return;
+            // Rebuilding on every poll would snap open entrant lists shut.
+            const json = JSON.stringify([data, wheelRun?.shown]);
+            if (json === shownHistory) return;
+            shownHistory = json;
+            const list = $('wheelHistory');
+            if (data.events.length) list.replaceChildren(...data.events.map(eventCard));
+            else list.textContent = 'No spins yet.';
+        }
+
         function selectTab(name) {
             activeTab = name;
             document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
             document.querySelectorAll('[data-pane]').forEach(p => { p.hidden = p.dataset.pane !== name; });
             if (name === 'log') loadLog();
+            if (name === 'wheel') loadWheelHistory();
         }
 
         // ---- Wiring ----
@@ -529,6 +806,25 @@
 
         document.querySelectorAll('.tab').forEach(t =>
             t.addEventListener('click', () => selectTab(t.dataset.tab)));
+
+        for (let i = 1; i <= 10; i++) {
+            const slot = document.createElement('div');
+            slot.className = 'prize-slot';
+            const label = document.createElement('label');
+            label.htmlFor = `prize${i}`;
+            label.textContent = i;
+            const input = document.createElement('input');
+            input.id = `prize${i}`;
+            input.maxLength = 60;
+            input.autocomplete = 'off';
+            slot.append(label, input);
+            $('prizeSlots').append(slot);
+        }
+
+        $('wheelSetup').addEventListener('submit', e => {
+            e.preventDefault();
+            spinWheel();
+        });
 
         $('signOutBtn').addEventListener('click', () => signOut());
         $('allBtn').addEventListener('click', () => change('/api/members/included', { included: true }));
@@ -549,6 +845,7 @@
                 const data = await withSession(() => api('/api/state'));
                 if (data) setState(data);
                 if (activeTab === 'log') loadLog();
+                if (activeTab === 'wheel') loadWheelHistory();
             } catch { /* the next poll tries again */ }
         }, POLL_MS);
 

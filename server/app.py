@@ -48,6 +48,9 @@ FAIL_WINDOW = 600               # repeated bad keys can get the NAS IP blocked b
 FAIL_LIMIT_IP = 10              # Torn, which would also take War Codex down, so
 FAIL_LIMIT_ALL = 30             # failed logins are capped per IP and overall
 LOG_PAGE = 500
+HISTORY_PAGE = 50
+MAX_PRIZES = 10
+MAX_PRIZE_LENGTH = 60
 GENESIS = "0" * 64
 
 app = Flask(__name__)
@@ -459,6 +462,56 @@ def set_all_included():
                     g.me["id"], g.me["name"])
             db().commit()
     return jsonify(state_json(g.me))
+
+
+def event_json(row):
+    return {"seq": row["seq"], "ts": row["ts"], "actor_name": row["actor_name"],
+            "detail": json.loads(row["detail"]), "hash": row["hash"]}
+
+
+@app.route("/api/wheel/spin", methods=["POST"])
+@require("admin", "planner")
+def wheel_spin():
+    """Draw every winner at once and seal them in the log before anything animates.
+
+    The wheel on the page only replays this result, so nobody can stop a run or
+    re-roll after seeing an early winner they don't like.
+    """
+    body = request.get_json(silent=True) or {}
+    raw = body.get("prizes")
+    prizes = [str(p).strip() for p in raw if str(p).strip()] if isinstance(raw, list) else []
+    unique = bool(body.get("unique"))
+    if not 1 <= len(prizes) <= MAX_PRIZES:
+        return jsonify(error=f"Enter between 1 and {MAX_PRIZES} prizes."), 400
+    if any(len(p) > MAX_PRIZE_LENGTH for p in prizes):
+        return jsonify(error=f"Prizes can be up to {MAX_PRIZE_LENGTH} characters."), 400
+
+    with write_lock:
+        rows = db().execute("SELECT id, name FROM members WHERE active=1 AND included=1 "
+                            "ORDER BY name COLLATE NOCASE").fetchall()
+        entrants = [{"id": r["id"], "name": r["name"]} for r in rows]
+        if not entrants:
+            return jsonify(error="Tick at least one member first."), 400
+        if unique and len(entrants) < len(prizes):
+            return jsonify(error=f"{len(prizes)} prizes but only {len(entrants)} entrants "
+                                 "who can each win once."), 400
+        rng = secrets.SystemRandom()
+        winners = (rng.sample(entrants, len(prizes)) if unique
+                   else [rng.choice(entrants) for _ in prizes])
+        results = [{"prize": prize, **winner} for prize, winner in zip(prizes, winners)]
+        add_log("wheel.spun", {"entrants": entrants, "results": results, "unique": unique},
+                g.me["id"], g.me["name"])
+        db().commit()
+        row = db().execute("SELECT * FROM log ORDER BY seq DESC LIMIT 1").fetchone()
+    return jsonify(event_json(row))
+
+
+@app.route("/api/wheel/history")
+@require()
+def wheel_history():
+    rows = db().execute("SELECT * FROM log WHERE action='wheel.spun' ORDER BY seq DESC LIMIT ?",
+                        (HISTORY_PAGE,)).fetchall()
+    return jsonify(events=[event_json(r) for r in rows])
 
 
 init_db()

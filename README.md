@@ -22,6 +22,12 @@ Your browser remembers the key until you sign out. The server uses it at sign-in
 
 Everyone starts as a Member. Anyone who leaves the faction loses access and their role.
 
+## Spin the Wheel
+
+The wheel shows every ticked member. A Planner or the Admin fills in up to 10 prizes and presses Spin, and the wheel spins once per prize, in order, stopping on that prize's winner.
+
+The server draws all the winners and writes them to the log the moment Spin is pressed. The wheel only reveals that result, so a draw can't be stopped or re-rolled.
+
 ## How it's built
 
 - `index.html` is the whole site, served by GitHub Pages.
