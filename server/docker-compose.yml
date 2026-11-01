@@ -1,5 +1,6 @@
-# Torn Raffles API. Runs on the NAS, listening only on localhost; DSM's reverse
-# proxy publishes it at https://raffles.xerramc.synology.me:5443
+# Torn Raffles API. Runs on the NAS; DSM's reverse proxy publishes it at
+# https://raffles.xerramc.synology.me:5443. Never forward 5210 at the router.
+# DSM refuses to save the proxy rule if it binds to 127.0.0.1 alone.
 services:
   torn-raffles:
     image: python:3.12-slim
@@ -14,4 +15,4 @@ services:
       RAFFLES_ADMIN_ID: "2775419"
       RAFFLES_ALLOWED_ORIGIN: "https://lordxerra.github.io"
       RAFFLES_DATA_DIR: "/data"
-    command: ["sh", "-c", "pip install --no-index --find-links=/app/wheels flask gunicorn && exec gunicorn --workers 1 --threads 4 -b 127.0.0.1:5210 --access-logfile - --error-logfile - app:app"]
+    command: ["sh", "-c", "pip install --no-index --find-links=/app/wheels flask gunicorn && exec gunicorn --workers 1 --threads 4 -b 0.0.0.0:5210 -b [::1]:5210 --access-logfile - --error-logfile - app:app"]
