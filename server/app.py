@@ -174,8 +174,11 @@ def verify_chain():
 
 def torn_get(path, key):
     # The key goes in a header, not the URL, so it can't end up in any log.
+    # Torn's Cloudflare rejects urllib's default User-Agent.
     req = urllib.request.Request(f"{TORN_BASE}{path}?comment=TornRaffles",
-                                 headers={"Authorization": f"ApiKey {key}"})
+                                 headers={"Authorization": f"ApiKey {key}",
+                                          "User-Agent": "TornRaffles/0.01",
+                                          "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as res:
             data = json.loads(res.read().decode("utf-8"))
